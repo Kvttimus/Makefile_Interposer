@@ -10,16 +10,34 @@ import (
 )
 
 //1. (DONE) fork build process
-//2. (IN PROGRESS) trace syscall - need to trace all forks/clones
+//2. (DONE) trace syscall - need to trace all forks/clones
 //3. () parse/interpret args from syscall
 //4. () modify command (replace args in tracee memory by modifying registers)
 //5. () resume the process
 
-// TODO: Follow forks and clones
 // Find actual arguments (execve args)
+// execve signature: int execve(const char *pathname, char *const argv[], char *const envp[]);
+/*
+- Sys Call ID/Ret Val - %rax
+- Arg1 - %rdi
+- Arg2 - %rsi
+- Arg3 - %rdx
+- Arg4 - %r10
+- Arg5 - %r8
+- Arg6 - %r9
+
+rdi → pathname
+rsi → argv (arg vector array)
+rdx → envp (env var array)
+
+STEOS
+- fetch registers to locate * arrays in tracee addr sapce
+- read target strings using PTRACE_PEEKDATA or /proc/pid/mem access
+- 
+*/
+
 
 // GOAL - trace all exec related syscalls
-// LOOK INTO GO
 
 func procName(pid int) string {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
@@ -37,9 +55,9 @@ func main() {
 		return
 	}
 
-	runtime.LockOSThread() // pin go tracer to 1 program thread
+	runtime.LockOSThread() // pin go tracer to 1 program thread (req.)
 
-	// Step 1. Fork the process
+	// STEP 1. Fork the process  -1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1 ONE ONE ONE ONE ONE ONE
 	cmd := exec.Command(os.Args[1])
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -55,33 +73,48 @@ func main() {
 		return
 	}
 
-	// Step 2. Trace syscall
 	childPid := cmd.Process.Pid
 	var status syscall.WaitStatus  // wait res
 	var regs syscall.PtraceRegs  // reg snapshot
-
+	
+	// STEP 2. Trace syscall -2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2 TWO TWO TWO TWO TWO TWO
 	syscall.Wait4(childPid, &status, 0, nil)  // catch child init. stop
 
+	options := syscall.PTRACE_O_TRACEFORK |  // auto attach + stop any new child
+		syscall.PTRACE_O_TRACEVFORK |
+		syscall.PTRACE_O_TRACECLONE |
+		// changes the 7th bit to differentiate syscall start/stop vs other sigtraps
+		syscall.PTRACE_O_TRACESYSGOOD  
+	syscall.PtraceSetOptions(childPid, options)
+
+	syscall.PtraceSyscall(childPid, 0)
+
 	for {
-		err := syscall.PtraceSyscall(childPid, 0)
-		if (err != nil) { // resume until next syscall boundary
-			fmt.Println("SYSCALL failed")
+		// wait for event from any child (-1)
+		pid, err := syscall.Wait4(-1, &status, 0, nil)
+		if (err != nil) {  // traced all processes inc. fork/clone
+			fmt.Println("No traced processes left")
 			break
 		}
 
-		_, err = syscall.Wait4(childPid, &status, 0, nil)
-		if (err != nil) {  // stop at syscall boundary
-			fmt.Println("waitpid failed")
-			break
-		}
-
-		if (status.Exited() || status.Signaled()) {  // child exits normally/sigkill
+		if (status.Exited() || status.Signaled()) {  // cur pid died -> cont. to next
 			fmt.Println("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-			break
+			continue
 		}
 
-		if (syscall.PtraceGetRegs(childPid, &regs) == nil) {
-			fmt.Printf("[%s pid %d] hit syscall id: %d\n", procName(childPid), childPid, regs.Orig_rax);
+		sig := status.StopSignal()
+
+		if (sig == syscall.SIGTRAP | 0x80) {  // syscall enter/exit boundary
+			if (syscall.PtraceGetRegs(pid, &regs) == nil) {
+				fmt.Printf("[%s pid %d] hit syscall id: %d\n", procName(childPid), childPid, regs.Orig_rax)
+			}
+			syscall.PtraceSyscall(pid, 0)
+		} else if (status.TrapCause() != -1) {  // fork event stops on parent (child created) -> resume it
+			syscall.PtraceSyscall(pid, 0)
+		} else if (sig == syscall.SIGTRAP || sig == syscall.SIGSTOP) {  // other sigtraps/sigstops
+			syscall.PtraceSyscall(pid, 0)
+		} else {  // signal aimed @ tracee -> resume + reinject
+			syscall.PtraceSyscall(pid, int(sig))
 		}
 	}
 }
