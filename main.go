@@ -11,7 +11,7 @@ import (
 
 //1. (DONE) fork build process
 //2. (DONE) trace syscall - need to trace all forks/clones
-//3. () parse/interpret args from syscall
+//3. (IN PROGRESS) parse/interpret args from syscall
 //4. () modify command (replace args in tracee memory by modifying registers)
 //5. () resume the process
 
