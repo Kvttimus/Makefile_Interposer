@@ -1,4 +1,5 @@
-//(❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) //
+// (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) //
+// - (●'◡'●) ╰(*°▽°*)╯ (●'◡'●) ╰(*°▽°*)╯ (●'◡'●) ╰(*°▽°*)╯ (●'◡'●) ╰(*°▽°*)╯ (●'◡'●) ╰(*°▽°*)╯ - //
 
 package main
 
@@ -14,7 +15,7 @@ import (
 
 //1. (DONE) fork build process
 //2. (DONE) trace syscall - need to trace all forks/clones
-//3. (IN PROGRESS) parse/interpret args from syscall out of tracee memory
+//3. (TEST) parse/interpret args from syscall out of tracee memory
 //4. () modify command (replace args in tracee memory by modifying registers)
 //5. () resume the process
 
@@ -62,7 +63,7 @@ func readWord(pid int, addr uintptr) (uint64, bool) {  // retval: 8byte word, tr
 }
 
 // (rdi - pathname) follow pointer to NULl terminated C-string + read it
-func readCString(pid int, addr uintptr) (string) {
+func readCString(pid int, addr uintptr) (string) {  // can't pass in pointer mem addr bc its a new/separate memory space
 	var b []byte
 	for {
 		word, ok := readWord(pid, addr)
@@ -82,31 +83,20 @@ func readCString(pid int, addr uintptr) (string) {
 }
 
 // (rsi - argv) read NULL-terminated array of string pointers (argv/envp)
-func readStringArray(pid int, addr uintptr) []string {
+// (rdx - envp) count entries in a NULL-terminated ptr array w/out reading strings
+func readAndCountStringArray(pid int, addr uintptr) ([]string, int) {
 	var out []string
+	count := 0
 	for {
 		ptr, ok := readWord(pid, addr)
 		if (!ok || ptr == 0) {
 			break // NULL ptr terminates array 
 		}
 		out = append(out, readCString(pid, uintptr(ptr)))
+		count++
 		addr += 8  // again, read next block of data
 	}
-	return out
-}
-
-// (rdx - envp) count entries in a NULL-terminated ptr array w/out reading strings
-func countStringArray(pid int, addr uintptr) int {
-	count := 0
-	for {
-		ptr, ok := readWord(pid, addr)
-		if (!ok || ptr == 0) {
-			break
-		}
-		count++
-		addr += 8  // again x2, read next block of data
-	}
-	return count
+	return out, count
 }
 
 func main() {
@@ -120,6 +110,8 @@ func main() {
 	runtime.LockOSThread() // pin go tracer to 1 program thread (req.)
 
 	// ############################## STEP 1. Fork the process 1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1 ONE ONE ONE ONE ONE ONE
+
+	// TODO: instead of hardcoding cmd, just pass it in as a parameter -- easier
 	cmd := exec.Command(os.Args[1])
 	// cmd := exec.Command("./testExecve")  // -------------------- TESTING LINE TESTING LINE TESTING LINE --------------------
 	cmd.Stdin = os.Stdin
@@ -160,26 +152,27 @@ func main() {
 			break
 		}
 
-		if (status.Exited() || status.Signaled()) {  // cur pid died -> cont. to next
+		if (status.Exited() || status.Signaled()) {  // cur pid died/ended/exited -> cont. to next
 			fmt.Println("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
 			continue
 		}
 
 		sig := status.StopSignal()
 
+		// TODO: figure out when a syscall is entering/exiting
 		if (sig == syscall.SIGTRAP | 0x80) {  // syscall enter/exit boundary
 			// ############################## STEP 3. Parse execve args 3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3 THREE THREE THREE THREE THREE THREE
 			if (syscall.PtraceGetRegs(pid, &regs) == nil) {
 				if (regs.Orig_rax == 59) {
 					path := readCString(pid, uintptr(regs.Rdi))
-					argv := readStringArray(pid, uintptr(regs.Rsi))
-					envc := countStringArray(pid, uintptr(regs.Rdx))
+					argv, _ := readAndCountStringArray(pid, uintptr(regs.Rsi))
+					_, envc := readAndCountStringArray(pid, uintptr(regs.Rdx))
 					fmt.Printf("[%s pid %d] execve %q argv=%q /* %d env vars */ --- syscall num: %d\n\n\n",
 						procName(pid), pid, path, argv, envc, regs.Orig_rax)
 					// rdi, rsi, rdx
 				}
 				// Optional - uncomment to see all syscalls called, comment to only see execve syscalls
-				// fmt.Printf("[%s pid %d] hit syscall id: %d\n", procName(childPid), childPid, regs.Orig_rax)
+				fmt.Printf("[%s pid %d] hit syscall id: %d\n", procName(childPid), childPid, regs.Orig_rax)
 			}
 			syscall.PtraceSyscall(pid, 0)
 		} else if (status.TrapCause() != -1) {  // fork event stops on parent (child created) -> resume it
