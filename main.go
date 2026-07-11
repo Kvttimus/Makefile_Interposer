@@ -1,6 +1,9 @@
+//(❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) (❁´◡`❁) //
+
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,40 +14,99 @@ import (
 
 //1. (DONE) fork build process
 //2. (DONE) trace syscall - need to trace all forks/clones
-//3. (IN PROGRESS) parse/interpret args from syscall
+//3. (IN PROGRESS) parse/interpret args from syscall out of tracee memory
 //4. () modify command (replace args in tracee memory by modifying registers)
 //5. () resume the process
 
 // Find actual arguments (execve args)
 // execve signature: int execve(const char *pathname, char *const argv[], char *const envp[]);
 /*
-- Sys Call ID/Ret Val - %rax
-- Arg1 - %rdi
-- Arg2 - %rsi
-- Arg3 - %rdx
-- Arg4 - %r10
-- Arg5 - %r8
-- Arg6 - %r9
+	- Sys Call ID/Ret Val - %rax
+	- Arg1 - %rdi
+	- Arg2 - %rsi
+	- Arg3 - %rdx
+	- Arg4 - %r10
+	- Arg5 - %r8
+	- Arg6 - %r9
 
-rdi → pathname
-rsi → argv (arg vector array)
-rdx → envp (env var array)
+	rdi --> *pathname
+	rsi --> *argv (arg vector array)
+	rdx --> *envp (env var array)
 
-STEOS
-- fetch registers to locate * arrays in tracee addr sapce
-- read target strings using PTRACE_PEEKDATA or /proc/pid/mem access
-- 
+	STEOS
+	- fetch registers to locate * arrays in tracee addr sapce
+	- read target strings using PTRACE_PEEKDATA or /proc/pid/mem access
+	 
 */
 
 
 // GOAL - trace all exec related syscalls
 
+// HEKPER FUNC: get process name
 func procName(pid int) string {
 	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
 	if (err != nil) {  // process gone/unreachable :o
 		return "?"
 	}
 	return strings.TrimSpace(string(b))  // bytes-->string
+}
+
+// HELPER FUNC: reads 1 8-byte word out of TRACEE'S memory addr
+func readWord(pid int, addr uintptr) (uint64, bool) {  // retval: 8byte word, true/false - success/fail
+	buf := make([]byte, 8)
+	n, err := syscall.PtracePeekData(pid, addr, buf)
+	if (err != nil || n < 8) {
+		return 0, false
+	} 
+	return binary.LittleEndian.Uint64(buf), true  // x86_64 ubuntu runs little endian natively
+}
+
+// (rdi - pathname) follow pointer to NULl terminated C-string + read it
+func readCString(pid int, addr uintptr) (string) {
+	var b []byte
+	for {
+		word, ok := readWord(pid, addr)
+		if (!ok) {
+			break
+		}
+		for i := 0; i < 8; i++ {
+			c := byte(word >> (8 * i))  // pulls each byte out of word (L 8bit shift)
+			if (c == 0) {
+				return string(b)  // hit NUL terminator --> DONE YAYAYAYAY :o
+			}
+			b = append(b, c)
+		}
+		addr += 8  // read next block of data (next 64 bits/8 bytes)
+	}
+	return string(b)
+}
+
+// (rsi - argv) read NULL-terminated array of string pointers (argv/envp)
+func readStringArray(pid int, addr uintptr) []string {
+	var out []string
+	for {
+		ptr, ok := readWord(pid, addr)
+		if (!ok || ptr == 0) {
+			break // NULL ptr terminates array 
+		}
+		out = append(out, readCString(pid, uintptr(ptr)))
+		addr += 8  // again, read next block of data
+	}
+	return out
+}
+
+// (rdx - envp) count entries in a NULL-terminated ptr array w/out reading strings
+func countStringArray(pid int, addr uintptr) int {
+	count := 0
+	for {
+		ptr, ok := readWord(pid, addr)
+		if (!ok || ptr == 0) {
+			break
+		}
+		count++
+		addr += 8  // again x2, read next block of data
+	}
+	return count
 }
 
 func main() {
@@ -57,8 +119,9 @@ func main() {
 
 	runtime.LockOSThread() // pin go tracer to 1 program thread (req.)
 
-	// STEP 1. Fork the process  -1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1 ONE ONE ONE ONE ONE ONE
+	// ############################## STEP 1. Fork the process 1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1-1 ONE ONE ONE ONE ONE ONE
 	cmd := exec.Command(os.Args[1])
+	// cmd := exec.Command("./testExecve")  // -------------------- TESTING LINE TESTING LINE TESTING LINE --------------------
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -68,7 +131,7 @@ func main() {
 
 	// fork + exec child
 	err := cmd.Start()
-	if err != nil {
+	if (err != nil) {
 		fmt.Printf("fork failed: %v", err)
 		return
 	}
@@ -77,7 +140,7 @@ func main() {
 	var status syscall.WaitStatus  // wait res
 	var regs syscall.PtraceRegs  // reg snapshot
 	
-	// STEP 2. Trace syscall -2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2 TWO TWO TWO TWO TWO TWO
+	// ############################## STEP 2. Trace syscall 2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2-2 TWO TWO TWO TWO TWO TWO
 	syscall.Wait4(childPid, &status, 0, nil)  // catch child init. stop
 
 	options := syscall.PTRACE_O_TRACEFORK |  // auto attach + stop any new child
@@ -105,8 +168,18 @@ func main() {
 		sig := status.StopSignal()
 
 		if (sig == syscall.SIGTRAP | 0x80) {  // syscall enter/exit boundary
+			// ############################## STEP 3. Parse execve args 3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3 THREE THREE THREE THREE THREE THREE
 			if (syscall.PtraceGetRegs(pid, &regs) == nil) {
-				fmt.Printf("[%s pid %d] hit syscall id: %d\n", procName(childPid), childPid, regs.Orig_rax)
+				if (regs.Orig_rax == 59) {
+					path := readCString(pid, uintptr(regs.Rdi))
+					argv := readStringArray(pid, uintptr(regs.Rsi))
+					envc := countStringArray(pid, uintptr(regs.Rdx))
+					fmt.Printf("[%s pid %d] execve %q argv=%q /* %d env vars */ --- syscall num: %d\n\n\n",
+						procName(pid), pid, path, argv, envc, regs.Orig_rax)
+					// rdi, rsi, rdx
+				}
+				// Optional - uncomment to see all syscalls called, comment to only see execve syscalls
+				// fmt.Printf("[%s pid %d] hit syscall id: %d\n", procName(childPid), childPid, regs.Orig_rax)
 			}
 			syscall.PtraceSyscall(pid, 0)
 		} else if (status.TrapCause() != -1) {  // fork event stops on parent (child created) -> resume it
