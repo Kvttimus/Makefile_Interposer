@@ -17,6 +17,7 @@ import (
 //2. (DONE) trace syscall - need to trace all forks/clones
 //3. (TEST) parse/interpret args from syscall out of tracee memory
 //4. () modify command (replace args in tracee memory by modifying registers)
+//	-4.1. SIDENOTE - right now focus on argv modification, can expand to envp modification ltr
 //5. () resume the process
 
 // Find actual arguments (execve args)
@@ -153,26 +154,26 @@ func main() {
 		}
 
 		if (status.Exited() || status.Signaled()) {  // cur pid died/ended/exited -> cont. to next
-			fmt.Println("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+			fmt.Printf("%s %d: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n", procName(pid), pid)
 			continue
 		}
 
 		sig := status.StopSignal()
 
-		// TODO: figure out when a syscall is entering/exiting
 		if (sig == syscall.SIGTRAP | 0x80) {  // syscall enter/exit boundary
 			// ############################## STEP 3. Parse execve args 3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3-3 THREE THREE THREE THREE THREE THREE
 			if (syscall.PtraceGetRegs(pid, &regs) == nil) {
-				if (regs.Orig_rax == 59) {
+				if (regs.Orig_rax == 59 && int64(regs.Rax) == -38) {  // 59 filters for execve, -38 filters for only entry
 					path := readCString(pid, uintptr(regs.Rdi))
 					argv, _ := readAndCountStringArray(pid, uintptr(regs.Rsi))
-					_, envc := readAndCountStringArray(pid, uintptr(regs.Rdx))
-					fmt.Printf("[%s pid %d] execve %q argv=%q /* %d env vars */ --- syscall num: %d\n\n\n",
+					envv, envc := readAndCountStringArray(pid, uintptr(regs.Rdx))
+					fmt.Printf("[%s pid %d] execve %q argv=%q /* %d env vars */ --- syscall num: %d\n",
 						procName(pid), pid, path, argv, envc, regs.Orig_rax)
+					fmt.Printf(" -- (●'◡'●) -- first few env: %q\n\n\n", envv[:min(5, len(envv))])
 					// rdi, rsi, rdx
 				}
 				// Optional - uncomment to see all syscalls called, comment to only see execve syscalls
-				fmt.Printf("[%s pid %d] hit syscall id: %d\n", procName(childPid), childPid, regs.Orig_rax)
+				// fmt.Printf("[%s pid %d] hit syscall id: %d\n", procName(childPid), childPid, regs.Orig_rax)
 			}
 			syscall.PtraceSyscall(pid, 0)
 		} else if (status.TrapCause() != -1) {  // fork event stops on parent (child created) -> resume it
